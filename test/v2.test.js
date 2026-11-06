@@ -37,6 +37,8 @@ function mockCtx() {
 
 before(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), "vg-v2-"))
+  await fs.mkdir(path.join(os.homedir(), ".config", "opencode"), { recursive: true })
+  await fs.writeFile(path.join(os.homedir(), ".config", "opencode", "vibeguard-personal.json"), JSON.stringify({ names: [], addresses: [], other: [] }), { flag: "wx" })
   await fs.writeFile(
     path.join(dir, "vibeguard.config.json"),
     JSON.stringify({
@@ -46,7 +48,7 @@ before(async () => {
       patterns: {
         regex: [{ pattern: "\\bcfut_[A-Za-z0-9_-]{30,}\\b", category: "CLOUDFLARE_USER_TOKEN" }],
         builtin: [],
-        keywords: [],
+        keywords: [{ value: "/fake-private/path", category: "PATH" }],
         exclude: [],
       },
       subscription: { enabled: false },
@@ -58,6 +60,7 @@ before(async () => {
 after(async () => {
   if (OLD_ENV === undefined) delete process.env[ENV_KEY]
   else process.env[ENV_KEY] = OLD_ENV
+  await fs.unlink(path.join(os.homedir(), ".config", "opencode", "vibeguard-personal.json"))
   await fs.rm(dir, { recursive: true, force: true })
 })
 
@@ -72,14 +75,15 @@ describe("v2 setup", () => {
     assert.ok(m.toolHooks.has("execute.after"))
   })
 
-  it("no-op when disabled", async () => {
+  it("blocks registered hooks when disabled", async () => {
     const off = path.join(dir, "off.json")
     await fs.writeFile(off, JSON.stringify({ enabled: false }))
     process.env[ENV_KEY] = off
     const m = mockCtx()
     await setupV2(m.ctx)
-    assert.equal(m.sessionHooks.size, 0)
-    assert.equal(m.toolHooks.size, 0)
+    assert.throws(() => m.sessionHooks.get("context")({}), /protection unavailable/i)
+    assert.throws(() => m.sessionHooks.get("prompt")({}), /protection unavailable/i)
+    assert.throws(() => m.toolHooks.get("execute.before")({}), /protection unavailable/i)
     process.env[ENV_KEY] = path.join(dir, "vibeguard.config.json")
   })
 
@@ -119,8 +123,19 @@ describe("v2 setup", () => {
 
     // tool before：占位符还原，真值执行
     const be = { sessionID: "s1", tool: "bash", input: { command: `echo ${ph[0]}` } }
-    before(be)
-    assert.equal(be.input.command, `echo ${FAKE}`)
+    assert.throws(() => before(be), /not permitted/)
+    const web = { sessionID: "s1", tool: "websearch", input: Object.freeze({ query: ph[0] }) }
+    before(web)
+    assert.equal(web.input.query, ph[0])
+    const rawWeb = { sessionID: "s1", tool: "websearch", input: { query: FAKE } }
+    before(rawWeb)
+    assert.doesNotMatch(rawWeb.input.query, /cfut_/)
+    assert.throws(() => before({ sessionID: "other", tool: "read", input: { filePath: ph[0] } }), /unknown or expired/)
+    const pathEvent = { sessionID: "s1", prompt: { text: "/fake-private/path", files: [], agents: [], skills: [] } }
+    prompt(pathEvent)
+    const read = { sessionID: "s1", tool: "read", input: Object.freeze({ filePath: pathEvent.prompt.text }) }
+    before(read)
+    assert.equal(read.input.filePath, "/fake-private/path")
 
     // tool after：输出重新脱敏
     const ae = {
@@ -132,5 +147,17 @@ describe("v2 setup", () => {
     }
     after(ae)
     assert.doesNotMatch(JSON.stringify(ae.result), new RegExp(FAKE))
+  })
+
+  it("blocks a placeholder from a prior plugin instance after restart", async () => {
+    const first = mockCtx()
+    await setupV2(first.ctx)
+    const event = { sessionID: "restart-session", prompt: { text: "/fake-private/path" } }
+    first.sessionHooks.get("prompt")(event)
+    const second = mockCtx()
+    await setupV2(second.ctx)
+    assert.throws(() => second.toolHooks.get("execute.before")({
+      sessionID: "restart-session", tool: "read", input: { path: event.prompt.text },
+    }), /unknown or expired/)
   })
 })

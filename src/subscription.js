@@ -18,7 +18,7 @@ function parseRefreshMs(input, fallback) {
 export function normalizeSubscription(raw) {
   const cfg = raw && typeof raw === "object" ? raw : {}
   // 缺省开启订阅：拉失败自动 fail-closed 用本地规则，不影响现有行为
-  const enabled = cfg.enabled === undefined ? true : Boolean(cfg.enabled)
+  const enabled = cfg.enabled === undefined ? false : Boolean(cfg.enabled)
   const url = typeof cfg.url === "string" && cfg.url ? cfg.url : DEFAULT_SUBSCRIPTION_URL
   const refreshMs = parseRefreshMs(cfg.refresh ?? "24h", 24 * 3600000)
   const timeoutMs =

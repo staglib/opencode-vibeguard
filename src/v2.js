@@ -1,6 +1,6 @@
-import { loadConfig } from "./config.js"
+import { loadConfig, loadPersonalRules } from "./config.js"
 import { buildPatternSet } from "./patterns.js"
-import { PlaceholderSession } from "./session.js"
+import { PlaceholderSession, getPlaceholderRegex } from "./session.js"
 import { redactText } from "./engine.js"
 import { redactDeep, restoreDeep } from "./deep.js"
 import { createSubscription } from "./subscription.js"
@@ -30,7 +30,17 @@ export async function setupV2(ctx) {
     console.log(`[opencode-vibeguard] 配置：${from} enabled=${config.enabled}`)
   }
 
-  if (!config.enabled) return
+  let personalRules = []
+  let personalError
+  try { personalRules = await loadPersonalRules() } catch (error) { personalError = error.message }
+  if (!config.enabled || personalError) {
+    console.error("[opencode-vibeguard] Protection unavailable: configuration or personal rules invalid; model requests will be blocked if hooks are active.")
+    const block = () => { throw new Error(personalError || "Vibeguard protection unavailable: configuration missing, invalid, or disabled") }
+    for (const kind of ["prompt", "context", "compaction", "generate", "title"]) await ctx.session.hook(kind, block)
+    await ctx.tool.hook("execute.before", block)
+    return
+  }
+  config.patterns = { ...config.patterns, keywords: [...(config.patterns.keywords ?? []), ...personalRules] }
 
   // 规则订阅（V2）：本地规则 + 远端订阅合并，本地优先；拉失败 fail-closed。
   // patternsRef.current 在刷新时原地替换，所有钩子实时生效。
@@ -125,7 +135,7 @@ export async function setupV2(ctx) {
 
   const redactRequest = (event) => {
     const session = getSession(event?.sessionID)
-    if (!session) return
+    if (!session) throw new Error("Vibeguard: missing session ID")
     session.cleanup()
     let changed = 0
     if (Array.isArray(event.system)) {
@@ -178,12 +188,33 @@ export async function setupV2(ctx) {
   await ctx.session.hook("generate", redactRequest)
   await ctx.session.hook("title", redactRequest)
 
-  // 工具执行前还原占位符：本地执行拿到真值。
+  // Only restore explicitly classified PATH values into the local read tool.
+  // All other tools keep values masked; shell and write calls with placeholders
+  // are blocked rather than risking exfiltration or corrupt writes.
   await ctx.tool.hook("execute.before", (event) => {
     const session = getSession(event?.sessionID)
-    if (!session) return
+    if (!session) throw new Error("Vibeguard: missing session ID")
     session.cleanup()
-    restoreDeep(event.input, session)
+    const input = structuredClone(event.input)
+    const matches = []
+    const collect = (value) => {
+      if (typeof value === "string") matches.push(...value.matchAll(getPlaceholderRegex(session.prefix)))
+      else if (Array.isArray(value)) value.forEach(collect)
+      else if (value && typeof value === "object") Object.values(value).forEach(collect)
+    }
+    collect(input)
+    for (const match of matches) {
+      if (session.lookup(match[0]) === undefined) throw new Error("Vibeguard: unknown or expired placeholder in tool input")
+    }
+    const external = ["websearch", "webfetch", "experimental_image_generate"].includes(event.tool)
+    if (external) {
+      redactDeep(input, live(), session)
+    } else if (event.tool === "read" && matches.every((match) => match[0].startsWith(`${session.prefix}PATH_`))) {
+      restoreDeep(input, session)
+    } else if (matches.length > 0) {
+      throw new Error("Vibeguard: placeholder restoration is not permitted for this tool")
+    }
+    event.input = input
   })
 
   // 工具执行后重新脱敏：输出入库前变回占位符，避免明文落库。
@@ -213,6 +244,23 @@ export async function setupV2(ctx) {
       }
     }
   })
+
+  // Experimental test-only readiness marker. This is not an attestation that
+  // every sensitive value was detected, nor a boundary against other plugins.
+  if (process.env.VIBEGUARD_TEST_GATE_TOKEN) {
+    await ctx.session.hook("model.request", (event) => {
+      event.headers["x-vibeguard-test-ready"] = process.env.VIBEGUARD_TEST_GATE_TOKEN
+    })
+  }
+
+  // Exposed only after all protection hooks have registered successfully.
+  // Readiness is not a guarantee of complete anonymization.
+  if (ctx.rpc) {
+    const { VibeguardHealth } = await import("./health-rpc.js")
+    await ctx.rpc.register(VibeguardHealth, {
+      status: async () => ({ ready: true, version: "test-fork" }),
+    })
+  }
 
   if (debug) console.log("[opencode-vibeguard] v2 hooks 已注册：prompt/context/compaction/generate/title + tool execute.before/after")
 

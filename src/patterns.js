@@ -39,6 +39,15 @@ function peelInlineFlags(pattern, flags) {
  */
 const BUILTIN = new Map([
   [
+    "credit_card",
+    {
+      pattern: String.raw`(?<![0-9])(?:[0-9][ -]?){12,18}[0-9](?![0-9])`,
+      flags: "",
+      category: "CREDIT_CARD",
+      validate: "luhn",
+    },
+  ],
+  [
     "email",
     {
       pattern: String.raw`[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}`,
@@ -125,7 +134,7 @@ export function buildPatternSet(patterns) {
     if (!key) continue
     const rule = BUILTIN.get(key)
     if (!rule) continue
-    regexRules.push({ pattern: rule.pattern, flags: rule.flags, category: rule.category })
+    regexRules.push({ pattern: rule.pattern, flags: rule.flags, category: rule.category, validate: rule.validate })
   }
 
   const excludeSet = new Set(exclude.map((x) => String(x ?? "")))
@@ -136,4 +145,3 @@ export function buildPatternSet(patterns) {
     exclude: excludeSet,
   }
 }
-

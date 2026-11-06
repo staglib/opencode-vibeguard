@@ -87,3 +87,26 @@ export async function loadConfig(directory) {
   const cfg = normalizeConfig({ enabled: false })
   return { ...cfg, loadedFrom: "" }
 }
+
+// Values are read locally; never log their contents. Missing or malformed
+// files are reported as unavailable rather than silently dropping rules.
+export async function loadPersonalRules(file = path.join(os.homedir(), ".config", "opencode", "vibeguard-personal.json")) {
+  let content
+  try { content = await fs.readFile(file, "utf8") }
+  catch (error) {
+    throw new Error("Unable to read Vibeguard personal rules")
+  }
+  let data
+  try { data = JSON.parse(content) }
+  catch { throw new Error("Invalid JSON in Vibeguard personal rules") }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid Vibeguard personal rules format")
+  const entries = []
+  for (const [key, category] of [["names", "NAME"], ["addresses", "ADDRESS"], ["other", "PERSONAL"]]) {
+    if (!Array.isArray(data[key])) throw new Error(`Vibeguard personal rules: ${key} must be an array`)
+    for (const value of data[key]) {
+      if (typeof value !== "string" || value.trim().length < 3) throw new Error(`Vibeguard personal rules: ${key} entries must be strings with at least 3 characters`)
+      entries.push({ value: value.trim(), category })
+    }
+  }
+  return entries
+}

@@ -41,6 +41,21 @@ function insertCovered(covered, span) {
   return merged
 }
 
+function validCardNumber(value) {
+  const digits = value.replace(/[ -]/g, "")
+  if (digits.length < 13 || digits.length > 19 || /^(\d)\1+$/.test(digits)) return false
+  let sum = 0
+  for (let i = digits.length - 1, position = 0; i >= 0; i--, position++) {
+    let digit = Number(digits[i])
+    if (position % 2 === 1) {
+      digit *= 2
+      if (digit > 9) digit -= 9
+    }
+    sum += digit
+  }
+  return sum % 10 === 0
+}
+
 /**
  * 对输入文本进行脱敏替换，返回替换后的文本与命中信息。
  * 设计与 VibeGuard 的 redact 引擎一致：处理重叠命中，确保不会把占位符切碎。
@@ -81,6 +96,7 @@ export function redactText(input, patterns, session) {
       const end = start + m[0].length
       const original = text.slice(start, end)
       if (patterns.exclude.has(original)) continue
+      if (rule.validate === "luhn" && !validCardNumber(original)) continue
       found.push({ start, end, original, category: rule.category })
     }
   }
@@ -120,4 +136,3 @@ export function redactText(input, patterns, session) {
 
   return { text: out, matches: planned }
 }
-

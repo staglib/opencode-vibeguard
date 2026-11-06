@@ -113,9 +113,9 @@ function redactAll(set, text) {
 }
 
 describe("rules subscription", () => {
-  it("normalize defaults to enabled with sane refresh/timeout", () => {
+  it("normalize defaults to disabled with sane refresh/timeout", () => {
     const s = normalizeSubscription(undefined)
-    assert.equal(s.enabled, true)
+    assert.equal(s.enabled, false)
     assert.ok(s.url.includes("rules.json"))
     assert.equal(s.refreshMs, 24 * 3600000)
   })
