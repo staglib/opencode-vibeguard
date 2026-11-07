@@ -62,6 +62,44 @@ export async function setupV2(ctx) {
   const hydrations = new Map()
   const saveChains = new Map()
   const storeKey = (id) => `vibeguard.session.${id}`
+  const storePrefix = "vibeguard.session."
+
+  // Best-effort pruning of mappings whose session no longer exists. Runs once at
+  // setup; logs counts only (never values). A scan/list failure stops silently,
+  // because pruning is housekeeping, not protection.
+  const pruneOrphans = async () => {
+    if (!ctx.storage?.scan || !ctx.session?.list) return
+    try {
+      let live = new Set()
+      try {
+        const list = await ctx.session.list()
+        for (const s of list) if (s?.id) live.add(String(s.id))
+      } catch (error) {
+        if (debug) console.warn("[opencode-vibeguard] session list unavailable; pruning skipped", error)
+        return
+      }
+      if (live.size === 0) return
+      let removed = 0
+      let kept = 0
+      let after
+      do {
+        const result = await ctx.storage.scan({ prefix: storePrefix, after, limit: 200 })
+        const entries = result?.entries ?? []
+        for (const entry of entries) {
+          const id = entry.key.slice(storePrefix.length)
+          if (id && !live.has(id)) {
+            try { await ctx.storage.remove(entry.key); removed++ } catch { /* leave it */ }
+          } else {
+            kept++
+          }
+        }
+        after = result?.next
+      } while (after)
+      if (debug) console.log(`[opencode-vibeguard] pruning: removed ${removed} orphaned mapping(s), kept ${kept}`)
+    } catch (error) {
+      if (debug) console.warn("[opencode-vibeguard] pruning failed", error)
+    }
+  }
 
   const makeSession = () =>
     new PlaceholderSession({
@@ -227,6 +265,8 @@ export async function setupV2(ctx) {
       }
     }
   })
+
+  await pruneOrphans()
 
   // 发往模型前的各路请求统一脱敏（只影响本次出站，不改持久化历史）。
   await ctx.session.hook("context", redactRequest)
