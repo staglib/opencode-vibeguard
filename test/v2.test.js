@@ -37,8 +37,8 @@ function mockCtx() {
 
 before(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), "vg-v2-"))
-  await fs.mkdir(path.join(os.homedir(), ".config", "opencode"), { recursive: true })
-  await fs.writeFile(path.join(os.homedir(), ".config", "opencode", "vibeguard-personal.json"), JSON.stringify({ names: [], addresses: [], other: [] }), { flag: "wx" })
+  process.env.VIBEGUARD_PERSONAL_RULES = path.join(dir, "vibeguard-personal.json")
+  await fs.writeFile(process.env.VIBEGUARD_PERSONAL_RULES, JSON.stringify({ names: [], addresses: [], other: [] }))
   await fs.writeFile(
     path.join(dir, "vibeguard.config.json"),
     JSON.stringify({
@@ -60,7 +60,7 @@ before(async () => {
 after(async () => {
   if (OLD_ENV === undefined) delete process.env[ENV_KEY]
   else process.env[ENV_KEY] = OLD_ENV
-  await fs.unlink(path.join(os.homedir(), ".config", "opencode", "vibeguard-personal.json"))
+  delete process.env.VIBEGUARD_PERSONAL_RULES
   await fs.rm(dir, { recursive: true, force: true })
 })
 
@@ -97,7 +97,7 @@ describe("v2 setup", () => {
 
     // prompt：入库前脱敏
     const pe = { sessionID: "s1", prompt: { text: `key is ${FAKE}`, files: [], agents: [], skills: [] }, delivery: "steer" }
-    prompt(pe)
+    await prompt(pe)
     assert.doesNotMatch(pe.prompt.text, /cfut_/)
     const ph = pe.prompt.text.match(/__VG_CLOUDFLARE_USER_TOKEN_[0-9a-f]{12}__/)
     assert.ok(ph, "expected placeholder in prompt")
@@ -117,24 +117,24 @@ describe("v2 setup", () => {
         },
       ],
     }
-    context(ce)
+    await context(ce)
     assert.doesNotMatch(JSON.stringify(ce), new RegExp(FAKE))
     assert.equal(ce.messages[1].content[0].encrypted, "ENC-SIGNATURE")
 
     // tool before：占位符还原，真值执行
     const be = { sessionID: "s1", tool: "bash", input: { command: `echo ${ph[0]}` } }
-    assert.throws(() => before(be), /not permitted/)
+    await assert.rejects(before(be), /not permitted/)
     const web = { sessionID: "s1", tool: "websearch", input: Object.freeze({ query: ph[0] }) }
-    before(web)
+    await before(web)
     assert.equal(web.input.query, ph[0])
     const rawWeb = { sessionID: "s1", tool: "websearch", input: { query: FAKE } }
-    before(rawWeb)
+    await before(rawWeb)
     assert.doesNotMatch(rawWeb.input.query, /cfut_/)
-    assert.throws(() => before({ sessionID: "other", tool: "read", input: { filePath: ph[0] } }), /unknown or expired/)
+    await assert.rejects(before({ sessionID: "other", tool: "read", input: { filePath: ph[0] } }), /mapping unavailable/)
     const pathEvent = { sessionID: "s1", prompt: { text: "/fake-private/path", files: [], agents: [], skills: [] } }
     prompt(pathEvent)
     const read = { sessionID: "s1", tool: "read", input: Object.freeze({ filePath: pathEvent.prompt.text }) }
-    before(read)
+    await before(read)
     assert.equal(read.input.filePath, "/fake-private/path")
 
     // tool after：输出重新脱敏
@@ -145,7 +145,7 @@ describe("v2 setup", () => {
       input: {},
       result: { output: `out ${FAKE}`, content: `c ${FAKE}`, metadata: {} },
     }
-    after(ae)
+    await after(ae)
     assert.doesNotMatch(JSON.stringify(ae.result), new RegExp(FAKE))
   })
 
@@ -156,8 +156,8 @@ describe("v2 setup", () => {
     first.sessionHooks.get("prompt")(event)
     const second = mockCtx()
     await setupV2(second.ctx)
-    assert.throws(() => second.toolHooks.get("execute.before")({
+    await assert.rejects(second.toolHooks.get("execute.before")({
       sessionID: "restart-session", tool: "read", input: { path: event.prompt.text },
-    }), /unknown or expired/)
+    }), /mapping unavailable/)
   })
 })

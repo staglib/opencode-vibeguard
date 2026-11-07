@@ -36,6 +36,8 @@ export class PlaceholderSession {
     this.reverse = new Map()
     /** @type {Map<string,number>} */
     this.created = new Map()
+    /** Bumped on every mapping change; used by the persistence barrier. */
+    this.revision = 0
   }
 
   cleanup(now = Date.now()) {
@@ -95,13 +97,21 @@ export class PlaceholderSession {
    */
   getOrCreatePlaceholder(original, category) {
     const existing = this.lookupReverse(original)
-    if (existing) return existing
+    if (existing) {
+      // Sliding TTL: reuse counts as activity, so long sessions do not orphan
+      // placeholders that are still being referenced.
+      this.created.set(existing, Date.now())
+      this.revision += 1
+      return existing
+    }
 
     const now = Date.now()
     this.cleanup(now)
 
-    if (Number.isFinite(this.maxMappings) && this.maxMappings > 0) {
-      while (this.forward.size >= this.maxMappings) this.evictOldest()
+    if (Number.isFinite(this.maxMappings) && this.maxMappings > 0 && this.forward.size >= this.maxMappings) {
+      // Never silently evict: a dropped mapping can strand placeholders that are
+      // still present in retained history. Refuse instead; the caller fails closed.
+      throw new Error("Vibeguard: placeholder capacity reached; start a new conversation")
     }
 
     const base = this.generatePlaceholder(original, category)
@@ -110,12 +120,14 @@ export class PlaceholderSession {
       this.forward.set(base, original)
       this.reverse.set(original, base)
       this.created.set(base, now)
+      this.revision += 1
       return base
     }
 
     if (current === original) {
       this.reverse.set(original, base)
       this.created.set(base, now)
+      this.revision += 1
       return base
     }
 
@@ -128,14 +140,56 @@ export class PlaceholderSession {
         this.forward.set(candidate, original)
         this.reverse.set(original, candidate)
         this.created.set(candidate, now)
+        this.revision += 1
         return candidate
       }
       if (prev === original) {
         this.reverse.set(original, candidate)
         this.created.set(candidate, now)
+        this.revision += 1
         return candidate
       }
     }
+  }
+
+  /** Storage-safe snapshot of the live mappings. */
+  snapshot() {
+    const entries = []
+    for (const [placeholder, original] of this.forward.entries()) {
+      entries.push([placeholder, original, this.created.get(placeholder) ?? 0])
+    }
+    return { v: 1, entries }
+  }
+
+  /**
+   * Replace mappings with a validated snapshot.
+   * Returns false (leaving state untouched) on any malformed input.
+   */
+  hydrate(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false
+    if (raw.v !== 1 || !Array.isArray(raw.entries)) return false
+    if (Number.isFinite(this.maxMappings) && this.maxMappings > 0 && raw.entries.length > this.maxMappings) return false
+    const escaped = String(this.prefix).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    const shape = new RegExp(`^${escaped}[A-Z0-9_]+_[a-f0-9]{12}(?:_\\d+)?__$`)
+    const forward = new Map()
+    const reverse = new Map()
+    const created = new Map()
+    for (const entry of raw.entries) {
+      if (!Array.isArray(entry) || entry.length !== 3) return false
+      const [placeholder, original, at] = entry
+      if (typeof placeholder !== "string" || !shape.test(placeholder)) return false
+      if (typeof original !== "string" || original.length === 0) return false
+      if (!Number.isFinite(at) || at < 0) return false
+      if (forward.has(placeholder) || reverse.has(original)) return false
+      forward.set(placeholder, original)
+      reverse.set(original, placeholder)
+      created.set(placeholder, at)
+    }
+    this.forward = forward
+    this.reverse = reverse
+    this.created = created
+    this.revision = 0
+    return true
   }
 }
 

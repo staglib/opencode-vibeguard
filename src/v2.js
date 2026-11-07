@@ -59,19 +59,63 @@ export async function setupV2(ctx) {
   const patternsRef = subscription ? subscription.ref : { current: buildPatternSet(config.patterns) }
   const live = () => patternsRef.current
   const sessions = new Map()
+  const hydrations = new Map()
+  const saveChains = new Map()
+  const storeKey = (id) => `vibeguard.session.${id}`
 
+  const makeSession = () =>
+    new PlaceholderSession({
+      prefix: config.prefix,
+      ttlMs: config.ttlMs,
+      maxMappings: config.maxMappings,
+    })
+
+  // Single-flight hydration: no hook ever sees a partially loaded session, and a
+  // process restart re-reads mappings that were already persisted.
   const getSession = (sessionID) => {
     const key = String(sessionID ?? "")
     if (!key) return null
     const existing = sessions.get(key)
     if (existing) return existing
-    const created = new PlaceholderSession({
-      prefix: config.prefix,
-      ttlMs: config.ttlMs,
-      maxMappings: config.maxMappings,
+    let pending = hydrations.get(key)
+    if (!pending) {
+      pending = (async () => {
+        const created = makeSession()
+        if (ctx.storage) {
+          const raw = await ctx.storage.get(storeKey(key))
+          if (raw && !created.hydrate(raw) && debug) {
+            console.warn("[opencode-vibeguard] invalid stored mapping ignored; starting empty")
+          }
+        }
+        sessions.set(key, created)
+        hydrations.delete(key)
+        return created
+      })().catch((error) => {
+        hydrations.delete(key)
+        throw error
+      })
+      hydrations.set(key, pending)
+    }
+    return pending
+  }
+
+  // Durability barrier: serialize writes per session, and keep rewriting until a
+  // snapshot taken after the write matches the current revision. Failures reject,
+  // so the calling hook fails closed rather than emitting an unpersisted mapping.
+  const persist = (sessionID, session) => {
+    if (!ctx.storage) return Promise.resolve()
+    const key = String(sessionID ?? "")
+    const previous = saveChains.get(key) ?? Promise.resolve()
+    const next = previous.catch(() => {}).then(async () => {
+      for (;;) {
+        const revision = session.revision
+        const snapshot = session.snapshot()
+        await ctx.storage.set(storeKey(key), snapshot)
+        if (session.revision === revision) return
+      }
     })
-    sessions.set(key, created)
-    return created
+    saveChains.set(key, next)
+    return next
   }
 
   const redactString = (value, session) => {
@@ -133,8 +177,8 @@ export async function setupV2(ctx) {
     return changed
   }
 
-  const redactRequest = (event) => {
-    const session = getSession(event?.sessionID)
+  const redactRequest = async (event) => {
+    const session = await getSession(event?.sessionID)
     if (!session) throw new Error("Vibeguard: missing session ID")
     session.cleanup()
     let changed = 0
@@ -155,12 +199,13 @@ export async function setupV2(ctx) {
       }
     }
     if (debug && changed > 0) console.log(`[opencode-vibeguard] 出站请求脱敏：已修改 ${changed} 处文本片段`)
+    if (changed > 0) await persist(event?.sessionID, session)
   }
 
   // prompt 在入库前脱敏：DB 里存占位符，provider 永远见不到真值。
   // 改写 text 会让 files/agents/skills 的 mention 偏移失效，直接清除。
-  await ctx.session.hook("prompt", (event) => {
-    const session = getSession(event?.sessionID)
+  await ctx.session.hook("prompt", async (event) => {
+    const session = await getSession(event?.sessionID)
     if (!session) return
     session.cleanup()
     if (typeof event.prompt?.text === "string") {
@@ -178,6 +223,7 @@ export async function setupV2(ctx) {
           if (s && typeof s === "object" && "mention" in s) s.mention = undefined
         }
         if (debug) console.log("[opencode-vibeguard] prompt 入库前脱敏：已替换 1 处文本")
+        await persist(event?.sessionID, session)
       }
     }
   })
@@ -191,8 +237,8 @@ export async function setupV2(ctx) {
   // Only restore explicitly classified PATH values into the local read tool.
   // All other tools keep values masked; shell and write calls with placeholders
   // are blocked rather than risking exfiltration or corrupt writes.
-  await ctx.tool.hook("execute.before", (event) => {
-    const session = getSession(event?.sessionID)
+  await ctx.tool.hook("execute.before", async (event) => {
+    const session = await getSession(event?.sessionID)
     if (!session) throw new Error("Vibeguard: missing session ID")
     session.cleanup()
     const input = structuredClone(event.input)
@@ -203,25 +249,39 @@ export async function setupV2(ctx) {
       else if (value && typeof value === "object") Object.values(value).forEach(collect)
     }
     collect(input)
-    for (const match of matches) {
-      if (session.lookup(match[0]) === undefined) throw new Error("Vibeguard: unknown or expired placeholder in tool input")
-    }
+
     const external = ["websearch", "webfetch", "experimental_image_generate"].includes(event.tool)
     if (external) {
+      const revisionBefore = session.revision
       redactDeep(input, live(), session)
-    } else if (event.tool === "read" && matches.every((match) => match[0].startsWith(`${session.prefix}PATH_`))) {
+      // These mappings must be durable before the request leaves the machine.
+      if (session.revision !== revisionBefore) await persist(event?.sessionID, session)
+      event.input = input
+      return
+    }
+
+    // Resolve the whole input before restoring anything. Unknown tokens mean the
+    // mapping is gone (expired, or minted by another session/process); fail closed
+    // rather than passing a literal placeholder into a local tool.
+    const known = matches.filter((match) => session.lookup(match[0]) !== undefined)
+    const unknown = matches.filter((match) => session.lookup(match[0]) === undefined)
+    if (unknown.length > 0) {
+      throw new Error("Vibeguard: placeholder mapping unavailable (expired or from another session). Start a new conversation and re-supply the original value.")
+    }
+    if (event.tool === "read" && known.length > 0 && known.every((match) => match[0].startsWith(`${session.prefix}PATH_`))) {
       restoreDeep(input, session)
-    } else if (matches.length > 0) {
+    } else if (known.length > 0) {
       throw new Error("Vibeguard: placeholder restoration is not permitted for this tool")
     }
     event.input = input
   })
 
   // 工具执行后重新脱敏：输出入库前变回占位符，避免明文落库。
-  await ctx.tool.hook("execute.after", (event) => {
-    const session = getSession(event?.sessionID)
+  await ctx.tool.hook("execute.after", async (event) => {
+    const session = await getSession(event?.sessionID)
     if (!session) return
     session.cleanup()
+    const revisionBefore = session.revision
     if (event.status === "completed" && event.result && typeof event.result === "object") {
       const { output, content, metadata } = event.result
       if (output && typeof output === "object") redactDeep(output, live(), session)
@@ -243,6 +303,7 @@ export async function setupV2(ctx) {
         redactDeep(event.error.metadata, live(), session)
       }
     }
+    if (session.revision !== revisionBefore) await persist(event?.sessionID, session)
   })
 
   // Experimental test-only readiness marker. This is not an attestation that
