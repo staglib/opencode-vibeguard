@@ -113,7 +113,7 @@ export function buildPatternSet(patterns) {
       const value = String(x.value ?? "").trim()
       if (!value) return null
       const category = sanitizeCategory(x.category)
-      return { value, category }
+      return { value, category, boundary: Boolean(x.boundary) }
     })
     .filter(Boolean)
 

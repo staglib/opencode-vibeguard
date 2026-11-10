@@ -1,3 +1,12 @@
+const WORD_AT_END_RE = /[\p{L}\p{N}_]$/u
+const WORD_AT_START_RE = /^[\p{L}\p{N}_]/u
+
+function hasTokenBoundaries(text, start, end) {
+  const beforeIsWord = start > 0 && WORD_AT_END_RE.test(text.slice(0, start))
+  const afterIsWord = end < text.length && WORD_AT_START_RE.test(text.slice(end))
+  return !beforeIsWord && !afterIsWord
+}
+
 function subtractCovered(start, end, covered) {
   if (start >= end) return []
   const out = []
@@ -81,6 +90,7 @@ export function redactText(input, patterns, session) {
       const original = text.slice(start, end)
       idx = end
       if (patterns.exclude.has(original)) continue
+      if (rule.boundary && !hasTokenBoundaries(text, start, end)) continue
       found.push({ start, end, original, category: rule.category })
     }
   }
@@ -103,10 +113,13 @@ export function redactText(input, patterns, session) {
 
   if (found.length === 0) return { text, matches: [] }
 
-  // 右侧优先；同起点优先更长，便于把左侧大范围命中拆掉
+  // Prefer the longest match so a full path/address wins over a shorter
+  // personal value embedded inside it; use rightmost as the stable tie-breaker.
   found.sort((a, b) => {
-    if (a.start !== b.start) return b.start - a.start
-    return b.end - a.end
+    const aLength = a.end - a.start
+    const bLength = b.end - b.start
+    if (aLength !== bLength) return bLength - aLength
+    return b.start - a.start
   })
 
   const planned = []

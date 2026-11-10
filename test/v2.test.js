@@ -38,7 +38,7 @@ function mockCtx() {
 before(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), "vg-v2-"))
   process.env.VIBEGUARD_PERSONAL_RULES = path.join(dir, "vibeguard-personal.json")
-  await fs.writeFile(process.env.VIBEGUARD_PERSONAL_RULES, JSON.stringify({ names: [], addresses: [], other: [] }))
+  await fs.writeFile(process.env.VIBEGUARD_PERSONAL_RULES, JSON.stringify({ names: ["Joe"], addresses: [], other: [] }))
   await fs.writeFile(
     path.join(dir, "vibeguard.config.json"),
     JSON.stringify({
@@ -48,7 +48,7 @@ before(async () => {
       patterns: {
         regex: [{ pattern: "\\bcfut_[A-Za-z0-9_-]{30,}\\b", category: "CLOUDFLARE_USER_TOKEN" }],
         builtin: [],
-        keywords: [{ value: "/fake-private/path", category: "PATH" }],
+        keywords: [{ value: "/fake-private/Joe/path", category: "PATH" }],
         exclude: [],
       },
       subscription: { enabled: false },
@@ -131,11 +131,11 @@ describe("v2 setup", () => {
     await before(rawWeb)
     assert.doesNotMatch(rawWeb.input.query, /cfut_/)
     await assert.rejects(before({ sessionID: "other", tool: "read", input: { filePath: ph[0] } }), /mapping unavailable/)
-    const pathEvent = { sessionID: "s1", prompt: { text: "/fake-private/path", files: [], agents: [], skills: [] } }
+    const pathEvent = { sessionID: "s1", prompt: { text: "/fake-private/Joe/path", files: [], agents: [], skills: [] } }
     prompt(pathEvent)
     const read = { sessionID: "s1", tool: "read", input: Object.freeze({ filePath: pathEvent.prompt.text }) }
     await before(read)
-    assert.equal(read.input.filePath, "/fake-private/path")
+    assert.equal(read.input.filePath, "/fake-private/Joe/path")
 
     // tool after：输出重新脱敏
     const ae = {
@@ -152,7 +152,7 @@ describe("v2 setup", () => {
   it("blocks a placeholder from a prior plugin instance after restart", async () => {
     const first = mockCtx()
     await setupV2(first.ctx)
-    const event = { sessionID: "restart-session", prompt: { text: "/fake-private/path" } }
+    const event = { sessionID: "restart-session", prompt: { text: "/fake-private/Joe/path" } }
     first.sessionHooks.get("prompt")(event)
     const second = mockCtx()
     await setupV2(second.ctx)

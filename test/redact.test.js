@@ -49,3 +49,35 @@ describe("redact/restore round-trip", () => {
     assert.equal(restoreText("__VG_NOPE_abcdef123456__", session), "__VG_NOPE_abcdef123456__")
   })
 })
+
+
+describe("personal literal matching", () => {
+  it("redacts a standalone short name without mangling ordinary words", () => {
+    const patterns = buildPatternSet({
+      keywords: [{ value: "Joe", category: "NAME", boundary: true }],
+    })
+    const session = new PlaceholderSession({ prefix: "__VG_", ttlMs: 0, maxMappings: 1000 })
+    const out = redactText("Joey met Joe, then Joe's colleague.", patterns, session)
+
+    assert.match(out.text, /^Joey met __VG_NAME_[0-9a-f]{12}__, then __VG_NAME_[0-9a-f]{12}__'s colleague\.$/)
+    assert.equal(out.matches.length, 2)
+    assert.equal(restoreText(out.text, session), "Joey met Joe, then Joe's colleague.")
+  })
+
+  it("prefers a full PATH match over an embedded personal name", () => {
+    const path = "/home/Joe/project"
+    const patterns = buildPatternSet({
+      keywords: [
+        { value: path, category: "PATH" },
+        { value: "Joe", category: "NAME", boundary: true },
+      ],
+    })
+    const session = new PlaceholderSession({ prefix: "__VG_", ttlMs: 0, maxMappings: 1000 })
+    const out = redactText(path, patterns, session)
+
+    assert.match(out.text, /^__VG_PATH_[0-9a-f]{12}__$/)
+    assert.equal(out.matches.length, 1)
+    assert.equal(out.matches[0].category, "PATH")
+    assert.equal(restoreText(out.text, session), path)
+  })
+})

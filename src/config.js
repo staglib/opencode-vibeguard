@@ -102,7 +102,7 @@ export async function loadPersonalRules(file = process.env.VIBEGUARD_PERSONAL_RU
     if (!Array.isArray(data[key])) throw new Error(`Vibeguard personal rules: ${key} must be an array`)
     for (const value of data[key]) {
       if (typeof value !== "string" || value.trim().length < 3) throw new Error(`Vibeguard personal rules: ${key} entries must be strings with at least 3 characters`)
-      entries.push({ value: value.trim(), category })
+      entries.push({ value: value.trim(), category, boundary: true })
     }
   }
   return entries
