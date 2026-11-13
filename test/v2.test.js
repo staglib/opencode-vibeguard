@@ -132,10 +132,10 @@ describe("v2 setup", () => {
     assert.doesNotMatch(rawWeb.input.query, /cfut_/)
     await assert.rejects(before({ sessionID: "other", tool: "read", input: { filePath: ph[0] } }), /mapping unavailable/)
     const pathEvent = { sessionID: "s1", prompt: { text: "/fake-private/Joe/path", files: [], agents: [], skills: [] } }
-    prompt(pathEvent)
-    const read = { sessionID: "s1", tool: "read", input: Object.freeze({ filePath: pathEvent.prompt.text }) }
+    await prompt(pathEvent)
+    const read = { sessionID: "s1", tool: "read", input: Object.freeze({ path: pathEvent.prompt.text }) }
     await before(read)
-    assert.equal(read.input.filePath, "/fake-private/Joe/path")
+    assert.equal(read.input.path, "/fake-private/Joe/path")
 
     // tool after：输出重新脱敏
     const ae = {
@@ -147,6 +147,47 @@ describe("v2 setup", () => {
     }
     await after(ae)
     assert.doesNotMatch(JSON.stringify(ae.result), new RegExp(FAKE))
+  })
+
+  it("restores a PATH placeholder for read-only path tools only", async () => {
+    const m = mockCtx()
+    await setupV2(m.ctx)
+    const prompt = m.sessionHooks.get("prompt")
+    const before = m.toolHooks.get("execute.before")
+    const mint = async (sessionID, text) => {
+      const event = { sessionID, prompt: { text, files: [], agents: [], skills: [] } }
+      await prompt(event)
+      return event.prompt.text
+    }
+
+    // grep: PATH placeholder in path is restored
+    const grepPh = await mint("grep-session", "/fake-private/Joe/path")
+    assert.match(grepPh, /^__VG_PATH_[0-9a-f]{12}__$/)
+    const grep = { sessionID: "grep-session", tool: "grep", input: { path: grepPh, pattern: "Joe" } }
+    await before(grep)
+    assert.equal(grep.input.path, "/fake-private/Joe/path")
+
+    // glob: PATH placeholder in path is restored
+    const globPh = await mint("glob-session", "/fake-private/Joe/path")
+    const glob = { sessionID: "glob-session", tool: "glob", input: { path: globPh, pattern: "**/*.js" } }
+    await before(glob)
+    assert.equal(glob.input.path, "/fake-private/Joe/path")
+
+    // grep: PATH placeholder outside path is still refused
+    const patternPh = await mint("grep-pattern-session", "/fake-private/Joe/path")
+    const grepPattern = { sessionID: "grep-pattern-session", tool: "grep", input: { path: "/tmp", pattern: patternPh } }
+    await assert.rejects(before(grepPattern), /not permitted/)
+
+    // bash: PATH placeholder still refused
+    const bashPh = await mint("bash-session", "/fake-private/Joe/path")
+    const bash = { sessionID: "bash-session", tool: "bash", input: { command: `ls ${bashPh}` } }
+    await assert.rejects(before(bash), /not permitted/)
+
+    // read: non-PATH placeholder refused
+    const namePh = await mint("read-name-session", "hello Joe")
+    assert.match(namePh, /^hello __VG_NAME_[0-9a-f]{12}__$/)
+    const readName = { sessionID: "read-name-session", tool: "read", input: { path: namePh } }
+    await assert.rejects(before(readName), /not permitted/)
   })
 
   it("blocks a placeholder from a prior plugin instance after restart", async () => {

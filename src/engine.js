@@ -1,5 +1,5 @@
-const WORD_AT_END_RE = /[\p{L}\p{N}_]$/u
-const WORD_AT_START_RE = /^[\p{L}\p{N}_]/u
+const WORD_AT_END_RE = /[\p{L}\p{N}]$/u
+const WORD_AT_START_RE = /^[\p{L}\p{N}]/u
 
 function hasTokenBoundaries(text, start, end) {
   const beforeIsWord = start > 0 && WORD_AT_END_RE.test(text.slice(0, start))

@@ -3,7 +3,12 @@ import { buildPatternSet } from "./patterns.js"
 import { PlaceholderSession, getPlaceholderRegex } from "./session.js"
 import { redactText } from "./engine.js"
 import { redactDeep, restoreDeep } from "./deep.js"
+import { restoreText } from "./restore.js"
 import { createSubscription } from "./subscription.js"
+
+// Read-only tools whose PATH argument is a local filesystem location. For these
+// (and only these) a PATH placeholder is restored, and only in input.path.
+const PATH_RESTORE_TOOLS = new Set(["read", "grep", "glob", "list"])
 
 /**
  * V2 setup (`Plugin.define({ id, setup })` 形态，`Plugin.define` 是透传，
@@ -308,10 +313,15 @@ export async function setupV2(ctx) {
     if (unknown.length > 0) {
       throw new Error("Vibeguard: placeholder mapping unavailable (expired or from another session). Start a new conversation and re-supply the original value.")
     }
-    if (event.tool === "read" && known.length > 0 && known.every((match) => match[0].startsWith(`${session.prefix}PATH_`))) {
-      restoreDeep(input, session)
-    } else if (known.length > 0) {
-      throw new Error("Vibeguard: placeholder restoration is not permitted for this tool")
+    if (known.length > 0) {
+      const allPath = known.every((match) => match[0].startsWith(`${session.prefix}PATH_`))
+      const pathValue = typeof input?.path === "string" ? input.path : ""
+      const inPath = pathValue ? [...pathValue.matchAll(getPlaceholderRegex(session.prefix))].length : 0
+      if (PATH_RESTORE_TOOLS.has(event.tool) && allPath && inPath === known.length) {
+        input.path = restoreText(input.path, session)
+      } else {
+        throw new Error("Vibeguard: placeholder restoration is not permitted for this tool")
+      }
     }
     event.input = input
   })
